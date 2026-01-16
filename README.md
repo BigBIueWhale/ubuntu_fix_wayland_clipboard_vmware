@@ -329,10 +329,25 @@ mv ./sources/mutter/src/wayland/*.bak /tmp/
 
 3. Check if XWayland is running: `pgrep -a Xwayland`
 
-4. Verify patched mutter is loaded:
+4. Verify GNOME Shell restarted after install:
    ```bash
-   strings /usr/lib/x86_64-linux-gnu/libmutter-14.so.0 | grep VMWARE_CLIPBOARD_PATCH
+   # GNOME Shell start time should be AFTER the install timestamp
+   ps -p $(pgrep -x gnome-shell) -o lstart=
+   ls -la /usr/lib/x86_64-linux-gnu/libmutter-14.so.0.0.0
    ```
+
+5. Test clipboard sync between Wayland and X11:
+   ```bash
+   # Install clipboard tools for testing
+   sudo apt install xclip wl-clipboard
+
+   # Copy something via Wayland
+   echo "wayland_test_$(date +%s)" | wl-copy
+
+   # Check if X11 sees it (this is what the patch enables)
+   xclip -selection clipboard -o
+   ```
+   If both commands show the same text, the patch is working correctly on the host side.
 
 ### GNOME Shell crashes after install
 Reinstall stock mutter:
