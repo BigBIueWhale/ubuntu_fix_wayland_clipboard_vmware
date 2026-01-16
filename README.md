@@ -1,13 +1,14 @@
 # Fix VMware Clipboard on Ubuntu 24.04 Wayland
 
-**TL;DR:** VMware Workstation on Linux/Wayland monitors the **PRIMARY** selection (middle-click paste), not **CLIPBOARD** (Ctrl+C/V). Install `autocutsel` to sync them.
+**TL;DR:** VMware clipboard doesn't work on XWayland because `xclip` is broken. Use `xsel` instead.
 
 ```bash
-sudo apt install autocutsel
-autocutsel -fork -selection CLIPBOARD
-```
+sudo apt install xsel wl-clipboard
 
-Add `autocutsel -fork -selection CLIPBOARD` to your startup applications to make it permanent.
+# To copy host clipboard to VMware guest:
+wl-paste | xsel --clipboard --input
+# Then paste in VMware guest
+```
 
 ---
 
@@ -37,121 +38,98 @@ Tested with:
 
 **Result:** The patch worked correctly for Wayland→X11 sync, but **VMware clipboard still didn't work**.
 
-**How we verified the patch worked:**
+### Approach 2: Direct X11 Clipboard via xclip
+
+**Test:** Set the X11 CLIPBOARD directly using `xclip`:
 ```bash
-# Install test tools
-sudo apt install xclip wl-clipboard
-
-# Copy via Wayland
-echo "test_$(date +%s)" | wl-copy
-
-# Check if X11 sees it
-xclip -selection clipboard -o
+echo "test" | xclip -selection clipboard
 ```
 
-Both commands showed the same content, proving Wayland→X11 CLIPBOARD sync works.
+**Result:** VMware didn't pick it up. Paste in guest did nothing.
 
-### Approach 2: Direct X11 Clipboard Test
+### Approach 3: PRIMARY Selection via xclip
 
-**Test:** Set the X11 CLIPBOARD directly (bypassing Wayland entirely):
+**Test:** Set the X11 PRIMARY selection using `xclip`:
 ```bash
-echo "direct_x11_test" | xclip -selection clipboard
+echo "test" | xclip -selection primary
 ```
 
-**Result:** VMware still didn't pick it up. Paste in guest did nothing.
-
-**Conclusion:** The issue is NOT with Wayland/XWayland clipboard sync. VMware itself isn't monitoring CLIPBOARD.
+**Result:** VMware didn't pick it up either.
 
 ---
 
 ## The Discovery
 
-We tested the **PRIMARY** selection (the X11 "highlight to copy, middle-click to paste" mechanism):
+The issue is **not** about CLIPBOARD vs PRIMARY selection. It's about **xclip vs xsel**.
+
+We tested all combinations:
+
+| Tool | Selection | Works? |
+|------|-----------|--------|
+| xclip | CLIPBOARD | No |
+| xclip | PRIMARY | No |
+| xsel | CLIPBOARD | **Yes** |
+| xsel | PRIMARY | **Yes** |
 
 ```bash
-echo "primary_test" | xclip -selection primary
-```
+# These do NOT work:
+echo "test" | xclip -selection clipboard
+echo "test" | xclip -selection primary
 
-**Result:** IT WORKED! The text appeared when pasting in the VMware guest.
+# These WORK:
+echo "test" | xsel --clipboard --input
+echo "test" | xsel --primary --input
+```
 
 ---
 
 ## Root Cause
 
-VMware Workstation on Linux monitors the **PRIMARY** selection, not the **CLIPBOARD** selection, when running under XWayland.
+`xclip` and `xsel` handle X11 selection ownership differently under XWayland. VMware can monitor both CLIPBOARD and PRIMARY selections, but only `xsel` correctly serves the selection data to VMware under XWayland.
 
-| Selection | Mechanism | What VMware Does |
-|-----------|-----------|------------------|
-| CLIPBOARD | Ctrl+C / Ctrl+V | **Ignored** by VMware on XWayland |
-| PRIMARY | Highlight text / Middle-click | **Monitored** by VMware |
-
-This is likely a bug or limitation in VMware's Linux clipboard implementation when running under XWayland (vs native X11).
+This is likely due to how each tool manages the selection ownership lifecycle when running on XWayland vs native X11.
 
 ---
 
 ## The Solution
 
-Use `autocutsel` to automatically synchronize CLIPBOARD and PRIMARY selections:
+Use `xsel` instead of `xclip` to sync the Wayland clipboard to X11.
 
 ### Installation
 
 ```bash
-sudo apt install autocutsel
+sudo apt install xsel wl-clipboard
 ```
 
-### Usage
+### Manual Usage
 
 ```bash
-# Run in background (syncs CLIPBOARD → PRIMARY)
-autocutsel -fork -selection CLIPBOARD
+# Copy from Wayland clipboard to X11 (for VMware to pick up):
+wl-paste | xsel --clipboard --input
+
+# Then paste in VMware guest — it should work
 ```
 
-### Make It Permanent
+### Automated Solution (TODO)
 
-Add to GNOME startup applications:
-
-1. Open "Startup Applications" (search in Activities)
-2. Click "Add"
-3. Name: `Autocutsel`
-4. Command: `autocutsel -fork -selection CLIPBOARD`
-5. Save
-
-Or create a desktop file:
-
-```bash
-mkdir -p ~/.config/autostart
-cat > ~/.config/autostart/autocutsel.desktop << 'EOF'
-[Desktop Entry]
-Type=Application
-Name=Autocutsel
-Exec=autocutsel -fork -selection CLIPBOARD
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-EOF
-```
+A background script or service is needed to automatically sync the Wayland clipboard to X11 using `xsel` whenever the clipboard changes.
 
 ---
 
 ## Verification
 
-After starting autocutsel:
-
-1. Copy text in a Wayland app on the host (Ctrl+C)
-2. Click into VMware guest
-3. Paste (Ctrl+V) — should work now
-
-To verify the sync is working:
 ```bash
-# Copy something
-echo "clipboard_test" | wl-copy
+# 1. Copy something to Wayland clipboard
+echo "test_$(date +%s)" | wl-copy
 
-# Check both selections
-echo "CLIPBOARD:" && xclip -selection clipboard -o
-echo "PRIMARY:" && xclip -selection primary -o
+# 2. Sync to X11 using xsel
+wl-paste | xsel --clipboard --input
+
+# 3. Verify it's set
+xsel --clipboard --output
+
+# 4. Paste in VMware guest — should work
 ```
-
-Both should show the same content.
 
 ---
 
@@ -160,23 +138,11 @@ Both should show the same content.
 | What | Status |
 |------|--------|
 | Mutter focus restriction patch | Works, but doesn't fix VMware |
-| Wayland → X11 CLIPBOARD sync | Works correctly |
-| VMware monitoring CLIPBOARD | **Broken** on XWayland |
-| VMware monitoring PRIMARY | Works |
-| autocutsel CLIPBOARD↔PRIMARY sync | **Fixes the issue** |
+| Wayland → X11 sync | Works correctly |
+| VMware + xclip | **Broken** on XWayland |
+| VMware + xsel | **Works** |
 
-The Mutter patch is unnecessary for this specific issue. The problem is entirely on VMware's side — it monitors the wrong X11 selection when running under XWayland.
-
----
-
-## Why Not Patch Mutter Instead?
-
-We considered patching Mutter to auto-sync CLIPBOARD→PRIMARY, but:
-
-1. **Complexity:** Requires adding sync logic, not just removing checks
-2. **Risk:** Could cause infinite loops or break PRIMARY semantics
-3. **Maintenance:** Harder to maintain across Mutter versions
-4. **autocutsel exists:** Purpose-built, 66KB, battle-tested solution
+The Mutter patch is unnecessary for this specific issue. The problem is that `xclip` doesn't correctly serve X11 selections to VMware under XWayland. Using `xsel` instead fixes the issue.
 
 ---
 
