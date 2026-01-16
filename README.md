@@ -1,13 +1,12 @@
 # Fix VMware Clipboard on Ubuntu 24.04 Wayland
 
-**TL;DR:** VMware clipboard doesn't work on XWayland because `xclip` is broken. Use `xsel` instead.
+**TL;DR:** VMware clipboard doesn't work on XWayland because of how XWayland serves clipboard data. Using `xsel` as a bridge works, but causes UI flickering. No clean solution exists yet.
 
 ```bash
 sudo apt install xsel wl-clipboard
 
-# To copy host clipboard to VMware guest:
+# Manual sync (run each time you want to copy to VMware):
 wl-paste | xsel --clipboard --input
-# Then paste in VMware guest
 ```
 
 ---
@@ -91,9 +90,54 @@ This is likely due to how each tool manages the selection ownership lifecycle wh
 
 ---
 
-## The Solution
+## How xsel Works (And Why It Causes UI Flickering)
 
-Use `xsel` instead of `xclip` to sync the Wayland clipboard to X11.
+When you run `xsel --clipboard --input`, it:
+
+1. **Creates a 1x1 pixel X11 window** to claim clipboard ownership
+2. Stores the clipboard data
+3. Waits for other applications to request the data
+4. Serves the data when requested
+
+You can see these windows:
+```bash
+xwininfo -root -tree | grep xsel
+# Output:
+#   0x3000001 "xsel": ("xsel" "XSel")  1x1+0+0  +0+0
+```
+
+**The problem:** Even though the window is 1x1 pixels, GNOME's Mutter compositor still:
+- Registers it as a new window
+- Shows it briefly in the dock/taskbar
+- Causes the trash can icon to "bounce"
+- Creates visible UI flickering
+
+Every time we sync the clipboard, a new xsel window is created, causing this flickering.
+
+### Attempted Workarounds (None Fully Successful)
+
+**1. Using `xdotool windowunmap` to hide xsel windows:**
+```bash
+printf "%s" "$CONTENT" | xsel --clipboard --input &
+sleep 0.05
+for wid in $(xdotool search --name "xsel"); do
+    xdotool windowunmap "$wid"
+done
+```
+**Result:** Creates multiple xsel processes, doesn't eliminate flickering.
+
+**2. Using `--nodetach` flag:**
+```bash
+xsel --clipboard --input --nodetach
+```
+**Result:** Doesn't help with the window creation issue.
+
+**3. Persistent xsel process:**
+Attempting to keep a single xsel process running and feed it new data doesn't work because xsel reads input once and then holds it.
+
+---
+
+## The Solution (Works But Has Issues)
 
 ### Installation
 
@@ -103,33 +147,57 @@ sudo apt install xsel wl-clipboard
 
 ### Manual Usage
 
+For occasional use, manually sync when needed:
 ```bash
-# Copy from Wayland clipboard to X11 (for VMware to pick up):
+# Copy something with Ctrl+C, then run:
 wl-paste | xsel --clipboard --input
 
-# Then paste in VMware guest — it should work
+# Then paste in VMware guest
 ```
 
-### Automated Solution (TODO)
+### Automated Daemon (Causes UI Flickering)
 
-A background script or service is needed to automatically sync the Wayland clipboard to X11 using `xsel` whenever the clipboard changes.
-
----
-
-## Verification
+This polling daemon works but causes UI flickering every time the clipboard changes:
 
 ```bash
-# 1. Copy something to Wayland clipboard
-echo "test_$(date +%s)" | wl-copy
+#!/bin/bash
+# Save as: ~/.local/bin/clipboard-sync-vmware.sh
 
-# 2. Sync to X11 using xsel
-wl-paste | xsel --clipboard --input
+echo "Clipboard sync daemon for VMware"
+echo "Press Ctrl+C to stop"
 
-# 3. Verify it's set
-xsel --clipboard --output
-
-# 4. Paste in VMware guest — should work
+LAST_HASH=""
+while true; do
+    CURRENT=$(wl-paste 2>/dev/null)
+    CURRENT_HASH=$(echo "$CURRENT" | md5sum | cut -d" " -f1)
+    if [ "$CURRENT_HASH" != "$LAST_HASH" ] && [ -n "$CURRENT" ]; then
+        printf "%s" "$CURRENT" | xsel --clipboard --input
+        echo "[$(date +%H:%M:%S)] Synced: ${CURRENT:0:40}..."
+        LAST_HASH="$CURRENT_HASH"
+    fi
+    sleep 1
+done
 ```
+
+**Known issues with this daemon:**
+- UI flickers every time clipboard is synced
+- Trash can icon bounces in GNOME dock
+- Desktop may feel less responsive
+- Creates new xsel process on every sync
+
+### Why `wl-paste --watch` Doesn't Work
+
+The ideal solution would be:
+```bash
+wl-paste --watch sh -c 'xsel --clipboard --input'
+```
+
+But this fails on GNOME with:
+```
+Watch mode requires a compositor that supports the wlroots data-control protocol
+```
+
+GNOME's Mutter compositor doesn't support this protocol (it's wlroots-specific).
 
 ---
 
@@ -138,11 +206,25 @@ xsel --clipboard --output
 | What | Status |
 |------|--------|
 | Mutter focus restriction patch | Works, but doesn't fix VMware |
-| Wayland → X11 sync | Works correctly |
+| Wayland → X11 sync via XWayland | Broken for VMware |
 | VMware + xclip | **Broken** on XWayland |
-| VMware + xsel | **Works** |
+| VMware + xsel | **Works** but causes UI flickering |
+| `wl-paste --watch` | Not supported on GNOME/Mutter |
+| Clean automated solution | **Does not exist yet** |
 
-The Mutter patch is unnecessary for this specific issue. The problem is that `xclip` doesn't correctly serve X11 selections to VMware under XWayland. Using `xsel` instead fixes the issue.
+The fundamental issue is that `xsel` must create an X11 window to claim clipboard ownership, and GNOME/Mutter treats this as a regular window, causing UI flickering.
+
+---
+
+## What Would Fix This Properly
+
+1. **VMware fix:** VMware could update their Linux clipboard code to work properly with XWayland's clipboard serving mechanism (like xclip does... but in a way that works)
+
+2. **GNOME/Mutter fix:** Support the wlroots data-control protocol so `wl-paste --watch` works
+
+3. **xsel fix:** Option to create the ownership window as "override-redirect" so window managers ignore it
+
+4. **XWayland fix:** Fix whatever difference exists between how XWayland serves clipboard data vs how xsel does it
 
 ---
 
