@@ -17,6 +17,108 @@ Tested with VMware Workstation 17 Pro 17.6.4 (build-24832109).
 
 ---
 
+## Preconditions
+
+Before starting, verify your environment:
+
+```bash
+lsb_release -ds                              # Expect: Ubuntu 24.04.* LTS
+dpkg -s mutter-common | grep '^Version'      # Expect: 46.2-1ubuntu0.24.04.*
+echo $XDG_SESSION_TYPE                       # Expect: wayland (if x11, you don't need this patch)
+gnome-shell --version                        # Expect: GNOME Shell 46.*
+```
+
+---
+
+## Installation
+
+### Step 1: Clone this repo
+
+```bash
+git clone https://github.com/BigBIueWhale/ubuntu_fix_wayland_clipboard_vmware.git
+cd ubuntu_fix_wayland_clipboard_vmware
+```
+
+### Step 2: Install build dependencies
+
+```bash
+sudo apt update
+sudo apt install git build-essential ninja-build meson pkg-config
+```
+
+Enable source repositories (required for `apt build-dep`):
+
+```bash
+sudo cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak
+sudo sed -i 's/^\(Types:\s*deb\)\(\s\+\|\s*$\)/\1 deb-src\2/' /etc/apt/sources.list.d/ubuntu.sources
+sudo apt update
+sudo apt build-dep mutter
+```
+
+If `build-dep` fails with "deb-src" error, verify `/etc/apt/sources.list.d/ubuntu.sources` contains `Types: deb deb-src`.
+
+### Step 3: Clone mutter 46.2
+
+```bash
+mkdir -p ./sources
+git clone https://gitlab.gnome.org/GNOME/mutter.git ./sources/mutter
+cd ./sources/mutter && git checkout 46.2 && cd ../..
+```
+
+Verify with `cd ./sources/mutter && git describe --tags --exact-match` → should print `46.2`.
+
+### Step 4: Apply the patch
+
+```bash
+python3 ./patch_mutter_clipboard.py ./sources/mutter
+```
+
+**Expect:**
+- `[OK] Source tree validated against mutter 46.2 layout`
+- `[OK] Patched .../meta-wayland-data-device.c`
+- `[OK] Patched .../meta-wayland-data-device-primary.c`
+
+If you see `[ERROR]` about sentinels, your mutter version doesn't match 46.2.
+
+### Step 5: Build mutter
+
+```bash
+cd ./sources/mutter
+meson setup build --prefix=/usr --buildtype=release
+ninja -C build
+cd ../..
+```
+
+### Step 6: Install and restart
+
+```bash
+sudo ninja -C ./sources/mutter/build install
+```
+
+Then **log out and log back in** (or reboot).
+
+### Step 7: Prevent apt from overwriting your patch
+
+```bash
+sudo apt-mark hold mutter mutter-common libmutter-14-0
+```
+
+Verify with `apt-mark showhold | grep mutter`.
+
+---
+
+## Testing
+
+1. Start your VM (VMware or VirtualBox) with guest tools installed
+2. Copy text in a Wayland app on the host
+3. Click into the VM and paste — should work
+4. Copy text in the VM
+5. Click to a Wayland app and paste — should work
+
+The clipboard should now work regardless of which window is focused.
+
+---
+
 ## Problem Description
 
 ### Symptoms
@@ -39,260 +141,6 @@ The focus restrictions in Mutter's Wayland clipboard code prevent unfocused Wayl
 
 Since XWayland is "just another Wayland client" from Mutter's perspective, these restrictions
 block clipboard operations when VMware doesn't have focus.
-
-### The Solution
-Remove the focus checks entirely. If X11 could handle unrestricted clipboard access for
-30+ years, so can Wayland.
-
----
-
-## Quick Start (TL;DR)
-
-```bash
-# 1) Clone this repo
-git clone https://github.com/BigBIueWhale/ubuntu_fix_wayland_clipboard_vmware.git
-cd ubuntu_fix_wayland_clipboard_vmware
-```
-
-**Expect:** A new folder with the patcher script.
-
-```bash
-# 2) Enable source repositories and install build dependencies
-sudo apt update
-sudo apt install -y git build-essential ninja-build meson pkg-config
-
-# Enable deb-src (required for apt build-dep)
-sudo cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak
-sudo sed -i 's/^\(Types:\s*deb\)\(\s\+\|\s*$\)/\1 deb-src\2/' /etc/apt/sources.list.d/ubuntu.sources
-sudo apt update
-sudo apt build-dep -y mutter
-```
-
-**Expect:** Packages install successfully. If `build-dep` fails with "deb-src" error, check Section 1.
-
-```bash
-# 3) Clone mutter and checkout the exact version
-mkdir -p ./sources
-git clone https://gitlab.gnome.org/GNOME/mutter.git ./sources/mutter
-cd ./sources/mutter && git checkout 46.2 && cd ../..
-```
-
-**Expect:** Mutter 46.2 source tree in `./sources/mutter`.
-
-```bash
-# 4) Apply the patch
-python3 ./patch_mutter_clipboard.py ./sources/mutter
-```
-
-**Expect:**
-- Validates source layout using strict sentinels
-- Creates `.bak` backups of patched files
-- Prints `[OK] Patched ...` for each file
-- Shows diff preview of changes
-
-```bash
-# 5) Build mutter
-cd ./sources/mutter
-meson setup build --prefix=/usr --buildtype=release
-ninja -C build
-cd ../..
-```
-
-**Expect:** Meson configures and Ninja compiles without errors.
-
-```bash
-# 6) Install and restart GNOME Shell
-sudo ninja -C ./sources/mutter/build install
-# Then: Log out and log back in (or reboot)
-```
-
-**Expect:** After logging back in, clipboard works between VM and host.
-
-```bash
-# 7) Prevent apt from overwriting your patch
-sudo apt-mark hold mutter mutter-common libmutter-14-0
-```
-
-**Expect:** `mutter` shows in `apt-mark showhold`.
-
----
-
-## 0) Preconditions — Verify Environment
-
-```bash
-lsb_release -ds
-```
-
-**Expect:** `Ubuntu 24.04.* LTS`
-
-```bash
-dpkg -s mutter-common | grep '^Version'
-```
-
-**Expect:** `46.2-1ubuntu0.24.04.*` — This patcher targets **46.2** specifically.
-
-```bash
-echo $XDG_SESSION_TYPE
-```
-
-**Expect:** `wayland` — If you see `x11`, you're not on Wayland and don't need this patch.
-
-```bash
-gnome-shell --version
-```
-
-**Expect:** `GNOME Shell 46.*`
-
----
-
-## 1) Install Build Dependencies
-
-```bash
-sudo apt update
-sudo apt install -y git build-essential ninja-build meson pkg-config
-```
-
-**Expect:** Packages install successfully.
-
-### Enable Source Repositories (required for `apt build-dep`)
-
-Ubuntu 24.04 uses Deb822 format. We need to enable source repos:
-
-```bash
-# Backup first
-sudo cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak
-```
-
-**Expect:** Silent success.
-
-```bash
-# Add deb-src to Types: deb lines
-sudo sed -i 's/^\(Types:\s*deb\)\(\s\+\|\s*$\)/\1 deb-src\2/' /etc/apt/sources.list.d/ubuntu.sources
-```
-
-**Expect:** No output. File now has `Types: deb deb-src`.
-
-```bash
-# Refresh and install build deps
-sudo apt update
-sudo apt build-dep -y mutter
-```
-
-**Expect:** Build dependencies install. If you see "You must put some 'deb-src' URIs...", the sed command didn't work — check `/etc/apt/sources.list.d/ubuntu.sources` manually.
-
----
-
-## 2) Clone Mutter Source (Project-Local)
-
-```bash
-mkdir -p ./sources
-git clone https://gitlab.gnome.org/GNOME/mutter.git ./sources/mutter
-cd ./sources/mutter && git checkout 46.2
-```
-
-**Expect:** `HEAD is now at ... Bump version to 46.2`
-
-Verify:
-```bash
-git describe --tags --exact-match
-```
-
-**Expect:** `46.2`
-
-```bash
-cd ../..
-```
-
-Your project tree should look like:
-```
-ubuntu_fix_wayland_clipboard_vmware/
-├── patch_mutter_clipboard.py
-├── README.md
-└── sources/
-    └── mutter/   # checked out at tag 46.2
-```
-
----
-
-## 3) Apply the Patch
-
-```bash
-python3 ./patch_mutter_clipboard.py ./sources/mutter
-```
-
-**Expect:**
-- `[info] Detected version: 46.2`
-- `[OK] Source tree validated against mutter 46.2 layout`
-- `[OK] Patched .../meta-wayland-data-device.c`
-- `[OK] Patched .../meta-wayland-data-device-primary.c`
-- Diff preview showing the removed focus checks
-
-If you see `[ERROR]` about sentinels, your mutter version doesn't match 46.2.
-See **Troubleshooting** below.
-
----
-
-## 4) Build Mutter
-
-```bash
-cd ./sources/mutter
-meson setup build --prefix=/usr --buildtype=release
-ninja -C build
-```
-
-**Expect:** Compilation completes without errors.
-
-If meson fails with missing dependencies:
-```bash
-sudo apt build-dep mutter
-meson setup build --wipe --prefix=/usr --buildtype=release
-ninja -C build
-```
-
----
-
-## 5) Install and Restart
-
-```bash
-sudo ninja -C build install
-```
-
-**Expect:** Files installed to `/usr`.
-
-**Then restart GNOME Shell:**
-- **Option A (recommended):** Log out and log back in
-- **Option B:** Reboot
-- **Option C (X11 only):** `killall -3 gnome-shell`
-
----
-
-## 6) Prevent APT from Overwriting Your Patch
-
-```bash
-sudo apt-mark hold mutter mutter-common libmutter-14-0
-```
-
-**Verify:**
-```bash
-apt-mark showhold | grep mutter
-```
-
-**Expect:** `mutter`, `mutter-common`, `libmutter-14-0` listed.
-
-> **Trade-off:** While held, you won't receive mutter security updates.
-> When ready to update: unhold, upgrade, re-apply patch, hold again.
-
----
-
-## 7) Testing
-
-1. Start your VM (VMware or VirtualBox) with guest tools installed
-2. Copy text in a Wayland app on the host
-3. Click into the VM and paste — should work
-4. Copy text in the VM
-5. Click to a Wayland app and paste — should work
-
-The clipboard should now work regardless of which window is focused.
 
 ---
 
@@ -425,7 +273,7 @@ without the patch — but only after you click into the target window. The patch
 
 ---
 
-## Rollback (Return to Stock)
+## Rollback
 
 **Option A — Reinstall distro packages:**
 ```bash
@@ -451,20 +299,13 @@ sudo mv /etc/apt/sources.list.d/ubuntu.sources.bak /etc/apt/sources.list.d/ubunt
 sudo apt update
 ```
 
-**Expect:** Source indices no longer fetched; APT configuration returns to default.
-
 ---
 
 ## Troubleshooting
 
 ### "Sentinel not found" error
-Your mutter version doesn't match 46.2. Check:
-```bash
-dpkg -s mutter-common | grep Version
-```
-
-If your version differs significantly, you'll need to adapt the patch manually
-by comparing the upstream code at your version's tag.
+Your mutter version doesn't match 46.2. Check `dpkg -s mutter-common | grep Version`.
+If your version differs, adapt the patch manually by comparing upstream code at your version's tag.
 
 ### Build fails with missing dependencies
 ```bash
@@ -480,38 +321,46 @@ mv ./sources/mutter/src/wayland/*.bak /tmp/
 
 ### Clipboard still doesn't work
 
-1. Verify you're on Wayland:
-   ```bash
-   echo $XDG_SESSION_TYPE
-   ```
-   **Expect:** `wayland`
+1. Verify you're on Wayland: `echo $XDG_SESSION_TYPE` → should say `wayland`
 
-2. Check VM guest tools are installed and running:
-   - **VMware:** `systemctl status vmtoolsd` or check VMware menu → "Install VMware Tools"
-   - **VirtualBox:** `systemctl status vboxadd-service` or Devices → "Insert Guest Additions CD"
+2. Check VM guest tools are running:
+   - **VMware:** `systemctl status vmtoolsd`
+   - **VirtualBox:** `systemctl status vboxadd-service`
 
-3. Watch clipboard-related logs in real-time:
-   ```bash
-   journalctl --user -f | grep -i -E 'clipboard|selection|data.device'
-   ```
+3. Check if XWayland is running: `pgrep -a Xwayland`
 
-4. Check if XWayland is running (required for VMware/VBox):
-   ```bash
-   pgrep -a Xwayland
-   ```
-   **Expect:** A running Xwayland process
-
-5. Verify patched mutter is loaded (not stock):
+4. Verify patched mutter is loaded:
    ```bash
    strings /usr/lib/x86_64-linux-gnu/libmutter-14.so.0 | grep VMWARE_CLIPBOARD_PATCH
    ```
-   **Expect:** Output containing `VMWARE_CLIPBOARD_PATCH` (our marker)
 
 ### GNOME Shell crashes after install
 Reinstall stock mutter:
 ```bash
 sudo apt install --reinstall mutter mutter-common libmutter-14-0
 ```
+
+---
+
+## Security & Responsibility
+
+This patch removes a security feature that GNOME/Wayland ships intentionally. The focus-based
+clipboard restriction was designed to prevent background apps from silently reading or writing
+clipboard contents.
+
+**Apply only on systems you control** with explicit authorization. The trade-offs:
+
+| With Patch | Without Patch |
+|------------|---------------|
+| VMware/VBox clipboard works | VMware/VBox clipboard broken |
+| Clipboard managers work | Clipboard managers broken |
+| Any app can read/write clipboard | Only focused app can access clipboard |
+| Matches X11 behavior (30+ years) | "Secure" but breaks real workflows |
+
+If you're concerned about clipboard security, consider:
+- Running untrusted apps in a separate VM or container
+- Not installing this patch on shared/public machines
+- Using Wayland's intended security model (but losing VM clipboard)
 
 ---
 
@@ -535,28 +384,6 @@ sudo apt install --reinstall mutter mutter-common libmutter-14-0
    "privileged" clipboard access, but they haven't. Even if they did, it would
    require all affected software to be rewritten. Removing the restriction is
    simpler and matches X11 behavior.
-
----
-
-## Security & Responsibility
-
-This patch removes a security feature that GNOME/Wayland ships intentionally. The focus-based
-clipboard restriction was designed to prevent background apps from silently reading or writing
-clipboard contents.
-
-**Apply only on systems you control** with explicit authorization. The trade-offs:
-
-| With Patch | Without Patch |
-|------------|---------------|
-| VMware/VBox clipboard works | VMware/VBox clipboard broken |
-| Clipboard managers work | Clipboard managers broken |
-| Any app can read/write clipboard | Only focused app can access clipboard |
-| Matches X11 behavior (30+ years) | "Secure" but breaks real workflows |
-
-If you're concerned about clipboard security, consider:
-- Running untrusted apps in a separate VM or container
-- Not installing this patch on shared/public machines
-- Using Wayland's intended security model (but losing VM clipboard)
 
 ---
 
